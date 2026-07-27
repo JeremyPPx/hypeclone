@@ -35,9 +35,18 @@ public class DistrictMapGenerator : MonoBehaviour
 
     [Header("Layout")]
     public int districtsPerSide = 2; // 2x2 = 4 Stadtteile
-    public float districtSize = 120f;
+    public float districtSize = 120f; // wird bei Bedarf automatisch vergroessert, siehe assumedBuildingFootprint
     public int plotsPerDistrictSide = 4; // wie viele Gebaeude-Plots pro Stadtteil-Kante
-    public float plotPadding = 2f;
+    public float plotPadding = 4f;
+
+    [Tooltip("Geschaetzte Grundflaeche (Breite/Tiefe) eines typischen Gigapack-Gebaeudes in Metern. " +
+             "Wenn die Karte nach dem Generieren wie ein wirrer Klumpen aussieht: diesen Wert hochsetzen " +
+             "(z.B. auf 60-80), das war der Hauptgrund fuer Ueberlappungen.")]
+    public float assumedBuildingFootprint = 45f;
+
+    [Header("Boden")]
+    public bool generateGround = true;
+    public Material groundMaterial;
 
     [Header("Verticality (Hyper-Scape-Feeling)")]
     [Tooltip("Maximaler Sprung-/Dash-Abstand zwischen Daechern, damit Movement/Hacks das ueberbruecken koennen. An HackSystem.dashDistance + PlayerMovement.jumpHeight orientieren.")]
@@ -116,6 +125,10 @@ public class DistrictMapGenerator : MonoBehaviour
     }
 #endif
 
+    private float actualPlotSize;
+    private float actualDistrictSize;
+    private float largestFootprintSeen;
+
     [ContextMenu("Generate Map")]
     public void GenerateMap()
     {
@@ -124,40 +137,64 @@ public class DistrictMapGenerator : MonoBehaviour
         mapRoot = new GameObject("Generated_Map").transform;
         mapRoot.SetParent(transform, false);
 
+        // Plot-Groesse NIE kleiner als die geschaetzte Gebaeude-Grundflaeche + Puffer waehlen --
+        // das war der Grund fuer den ueberlappenden Gebaeude-Klumpen: die alte Formel hat nur
+        // districtSize/plotsPerDistrictSide gerechnet, ohne Ruecksicht auf die tatsaechliche
+        // Gebaeudegroesse zu nehmen.
+        float desiredPlotSize = (districtSize - roadWidth) / plotsPerDistrictSide;
+        actualPlotSize = Mathf.Max(desiredPlotSize, assumedBuildingFootprint + plotPadding);
+        actualDistrictSize = actualPlotSize * plotsPerDistrictSide + roadWidth;
+
+        largestFootprintSeen = 0f;
         var districtCenters = new List<Vector3>();
 
         for (int dz = 0; dz < districtsPerSide; dz++)
         {
             for (int dx = 0; dx < districtsPerSide; dx++)
             {
-                Vector3 districtOrigin = new Vector3(dx * districtSize, 0, dz * districtSize);
+                Vector3 districtOrigin = new Vector3(dx * actualDistrictSize, 0, dz * actualDistrictSize);
                 Transform districtRoot = new GameObject($"District_{dx}_{dz}").transform;
                 districtRoot.SetParent(mapRoot, false);
                 districtRoot.position = districtOrigin;
 
+                if (generateGround) GenerateGroundPlane(districtRoot, districtOrigin);
                 GenerateDistrict(districtRoot, districtOrigin);
-                districtCenters.Add(districtOrigin + new Vector3(districtSize * 0.5f, 0, districtSize * 0.5f));
+                districtCenters.Add(districtOrigin + new Vector3(actualDistrictSize * 0.5f, 0, actualDistrictSize * 0.5f));
             }
         }
 
         PlaceGameplayMarkers(districtCenters);
 
-        Debug.Log($"[DistrictMapGenerator] Karte generiert: {districtsPerSide * districtsPerSide} Stadtteile, " +
-                  $"{clueCount} Hinweise, 1 Boss-Punkt, {playerSpawnCount} Spieler-Spawns.");
+        Debug.Log($"[DistrictMapGenerator] Karte generiert: {districtsPerSide * districtsPerSide} Stadtteile a {actualDistrictSize:F0}m, " +
+                  $"Plot-Groesse {actualPlotSize:F0}m, groesste gemessene Gebaeude-Grundflaeche {largestFootprintSeen:F0}m. " +
+                  $"{clueCount} Hinweise, 1 Boss-Punkt, {playerSpawnCount} Spieler-Spawns." +
+                  (largestFootprintSeen > actualPlotSize ? " ACHTUNG: gemessene Gebaeude sind groesser als die Plot-Groesse -- 'Assumed Building Footprint' im Inspector hochsetzen und neu generieren." : ""));
+    }
+
+    private void GenerateGroundPlane(Transform districtRoot, Vector3 origin)
+    {
+        GameObject ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        ground.name = "Ground";
+        ground.transform.SetParent(districtRoot, false);
+        // Unity-Plane-Primitive ist 10x10 Units bei Scale 1.
+        ground.transform.localScale = new Vector3(actualDistrictSize / 10f, 1f, actualDistrictSize / 10f);
+        ground.transform.position = origin + new Vector3(actualDistrictSize * 0.5f, -0.05f, actualDistrictSize * 0.5f);
+        if (groundMaterial != null)
+        {
+            ground.GetComponent<Renderer>().sharedMaterial = groundMaterial;
+        }
     }
 
     private void GenerateDistrict(Transform districtRoot, Vector3 origin)
     {
-        float plotSize = (districtSize - roadWidth) / plotsPerDistrictSide;
-
         for (int z = 0; z < plotsPerDistrictSide; z++)
         {
             for (int x = 0; x < plotsPerDistrictSide; x++)
             {
                 Vector3 plotCenter = origin + new Vector3(
-                    x * plotSize + plotSize * 0.5f + roadWidth * 0.5f,
+                    x * actualPlotSize + actualPlotSize * 0.5f + roadWidth * 0.5f,
                     0,
-                    z * plotSize + plotSize * 0.5f + roadWidth * 0.5f
+                    z * actualPlotSize + actualPlotSize * 0.5f + roadWidth * 0.5f
                 );
 
                 // Randplaetze (aussen im Stadtteil) bekommen eher niedrige Gebaeude,
@@ -171,6 +208,8 @@ public class DistrictMapGenerator : MonoBehaviour
 
                 GameObject instance = Instantiate(prefab, plotCenter, Quaternion.Euler(0, rotationY, 0), districtRoot);
                 instance.name = $"{prefab.name}_{x}_{z}";
+
+                MeasureFootprint(instance);
             }
         }
 
@@ -179,6 +218,20 @@ public class DistrictMapGenerator : MonoBehaviour
         {
             PlaceRoadRing(districtRoot, origin);
         }
+    }
+
+    // Misst die tatsaechliche Grundflaeche des instanzierten Prefabs (ueber alle Renderer-Bounds),
+    // damit wir im Log warnen koennen, falls Gebaeude groesser als die Plot-Groesse sind.
+    private void MeasureFootprint(GameObject instance)
+    {
+        var renderers = instance.GetComponentsInChildren<Renderer>();
+        if (renderers.Length == 0) return;
+
+        Bounds bounds = renderers[0].bounds;
+        foreach (var r in renderers) bounds.Encapsulate(r.bounds);
+
+        float footprint = Mathf.Max(bounds.size.x, bounds.size.z);
+        if (footprint > largestFootprintSeen) largestFootprintSeen = footprint;
     }
 
     private BuildingTier PickTier(bool isEdgePlot)
@@ -201,10 +254,10 @@ public class DistrictMapGenerator : MonoBehaviour
 
     private void PlaceRoadRing(Transform districtRoot, Vector3 origin)
     {
-        Vector3 center = origin + new Vector3(districtSize * 0.5f, 0, districtSize * 0.5f);
+        Vector3 center = origin + new Vector3(actualDistrictSize * 0.5f, 0, actualDistrictSize * 0.5f);
         GameObject road = Instantiate(roadSegmentPrefab, center, Quaternion.identity, districtRoot);
         road.name = "RoadSegment";
-        road.transform.localScale = new Vector3(districtSize, 1, roadWidth);
+        road.transform.localScale = new Vector3(actualDistrictSize, 1, roadWidth);
     }
 
     private void PlaceGameplayMarkers(List<Vector3> districtCenters)
@@ -230,7 +283,7 @@ public class DistrictMapGenerator : MonoBehaviour
         {
             for (int i = 0; i < 2; i++)
             {
-                Vector3 pos = center + Random.insideUnitSphere * (districtSize * 0.3f);
+                Vector3 pos = center + Random.insideUnitSphere * (actualDistrictSize * 0.3f);
                 pos.y = 0;
                 SpawnMarker(lootSpawnMarkerPrefab, pos, markerRoot, $"LootSpawn_{lootIndex}");
                 lootIndex++;
@@ -245,7 +298,7 @@ public class DistrictMapGenerator : MonoBehaviour
             for (int i = 0; i < spawnsPerDistrict && spawnIndex < playerSpawnCount; i++)
             {
                 float angle = (360f / spawnsPerDistrict) * i;
-                Vector3 offset = Quaternion.Euler(0, angle, 0) * Vector3.forward * (districtSize * 0.45f);
+                Vector3 offset = Quaternion.Euler(0, angle, 0) * Vector3.forward * (actualDistrictSize * 0.45f);
                 SpawnMarker(playerSpawnMarkerPrefab, center + offset, markerRoot, $"PlayerSpawn_{spawnIndex}");
                 spawnIndex++;
             }
