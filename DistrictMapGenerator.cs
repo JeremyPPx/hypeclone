@@ -1,5 +1,10 @@
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+using System.IO;
+#endif
 
 // Generiert eine Karte aus 4 Stadtteilen (2x2-Raster) aus deinen eigenen Gebaeude-Prefabs.
 // Kein Runtime-Zufall im Spiel selbst -- das hier ist ein EDITOR-Werkzeug: einmal Werte
@@ -48,7 +53,68 @@ public class DistrictMapGenerator : MonoBehaviour
     public int clueCount = 3;
     public int playerSpawnCount = 8;
 
+    [Header("Auto-Populate (Editor only)")]
+    [Tooltip("Root-Ordner im Project-Fenster, unter dem automatisch nach Prefabs gesucht wird, z.B. Assets/LeartesStudios/CyberpunkGigapack/Art/Prefabs")]
+    public string gigapackPrefabRoot = "Assets/LeartesStudios/CyberpunkGigapack/Art/Prefabs";
+
     private Transform mapRoot;
+
+#if UNITY_EDITOR
+    // Durchsucht den Gigapack-Prefab-Ordner automatisch und sortiert die Gebaeude
+    // anhand des Unterordner-Namens in Tiers ein (Buildings = hoch/hero, alles mit
+    // "Background" im Namen = niedrig/Fuellgebaeude). Strassen aus "RoadModul*"
+    // werden ebenfalls automatisch als roadSegmentPrefab gesetzt.
+    // Ersetzt das manuelle Reinziehen einzelner Prefabs.
+    [ContextMenu("Auto-Populate From Gigapack Folders")]
+    public void AutoPopulateFromGigapack()
+    {
+        if (!AssetDatabase.IsValidFolder(gigapackPrefabRoot))
+        {
+            Debug.LogError($"[DistrictMapGenerator] Ordner nicht gefunden: {gigapackPrefabRoot}. " +
+                            "Pfad im Inspector bei 'Gigapack Prefab Root' pruefen (rechte Maustaste auf den Ordner im Project-Fenster -> 'Copy Path' geht auch).");
+            return;
+        }
+
+        string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { gigapackPrefabRoot });
+        var byFolder = new Dictionary<string, List<GameObject>>();
+
+        foreach (var guid in guids)
+        {
+            string path = AssetDatabase.GUIDToAssetPath(guid);
+            string folderName = Path.GetFileName(Path.GetDirectoryName(path));
+            GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
+            if (prefab == null) continue;
+
+            if (!byFolder.ContainsKey(folderName)) byFolder[folderName] = new List<GameObject>();
+            byFolder[folderName].Add(prefab);
+        }
+
+        var tiers = new List<BuildingTier>();
+        foreach (var kvp in byFolder)
+        {
+            string folder = kvp.Key;
+            if (folder.IndexOf("Background", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                tiers.Add(new BuildingTier { name = "Background (niedrig/Fuellgebaeude)", prefabs = kvp.Value.ToArray(), approxRoofHeight = 4f });
+            }
+            else if (folder.IndexOf("Building", System.StringComparison.OrdinalIgnoreCase) >= 0
+                     || folder.IndexOf("Structure", System.StringComparison.OrdinalIgnoreCase) >= 0
+                     || folder.IndexOf("Architecture", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                tiers.Add(new BuildingTier { name = $"{folder} (hero)", prefabs = kvp.Value.ToArray(), approxRoofHeight = 14f });
+            }
+            else if (folder.IndexOf("RoadModul", System.StringComparison.OrdinalIgnoreCase) >= 0 && kvp.Value.Count > 0)
+            {
+                roadSegmentPrefab = kvp.Value[0];
+            }
+        }
+
+        buildingTiers = tiers.ToArray();
+        Debug.Log($"[DistrictMapGenerator] Auto-Populate fertig: {buildingTiers.Length} Gebaeude-Tiers gefunden " +
+                  $"({string.Join(", ", buildingTiers.Select(t => $"{t.name}: {t.prefabs.Length}"))}). " +
+                  $"Strassen-Prefab: {(roadSegmentPrefab != null ? roadSegmentPrefab.name : "keins gefunden")}.");
+    }
+#endif
 
     [ContextMenu("Generate Map")]
     public void GenerateMap()
