@@ -72,41 +72,68 @@ public class FullMapGenerator : MonoBehaviour
         }
 
         string[] guids = AssetDatabase.FindAssets("t:Prefab", new[] { prefabRoot });
-        var byFolder = new Dictionary<string, List<GameObject>>();
+
+        // Wichtig: wir matchen gegen den KOMPLETTEN Pfad, nicht nur den direkten
+        // Elternordner -- Synty-Packs verschachteln Gebaeude oft in Unterordnern
+        // (z.B. Prefabs/Buildings/Skyscrapers/...), da war der direkte-Elternordner-
+        // Vergleich vorher der Grund, warum nichts gefunden wurde.
+        var buildingPrefabs = new List<GameObject>();
+        var environmentPrefabs = new List<GameObject>();
+        var roadCandidates = new List<GameObject>();
+        int totalPrefabsScanned = 0;
 
         foreach (var guid in guids)
         {
             string path = AssetDatabase.GUIDToAssetPath(guid);
-            string folderName = Path.GetFileName(Path.GetDirectoryName(path));
             GameObject prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
             if (prefab == null) continue;
-            if (!byFolder.ContainsKey(folderName)) byFolder[folderName] = new List<GameObject>();
-            byFolder[folderName].Add(prefab);
+            totalPrefabsScanned++;
+
+            if (path.IndexOf("Building", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                buildingPrefabs.Add(prefab);
+            }
+            else if (path.IndexOf("Environment", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                environmentPrefabs.Add(prefab);
+                // Innerhalb von Environment nach offensichtlichen Straßen-/Bürgersteig-Namen suchen.
+                if (path.IndexOf("Road", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || path.IndexOf("Street", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || path.IndexOf("Sidewalk", System.StringComparison.OrdinalIgnoreCase) >= 0
+                    || prefab.name.IndexOf("Road", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    roadCandidates.Add(prefab);
+                }
+            }
+            else if (path.IndexOf("Road", System.StringComparison.OrdinalIgnoreCase) >= 0
+                     || path.IndexOf("Street", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                roadCandidates.Add(prefab);
+            }
         }
 
         var tiers = new List<BuildingTier>();
-        foreach (var kvp in byFolder)
+        if (buildingPrefabs.Count > 0)
         {
-            if (kvp.Key.IndexOf("Building", System.StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                tiers.Add(new BuildingTier { name = kvp.Key, prefabs = kvp.Value.ToArray(), approxRoofHeight = 12f });
-            }
-            else if (kvp.Key.IndexOf("Environment", System.StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                tiers.Add(new BuildingTier { name = kvp.Key, prefabs = kvp.Value.ToArray(), approxRoofHeight = 4f });
-            }
-            else if (kvp.Key.IndexOf("Road", System.StringComparison.OrdinalIgnoreCase) >= 0 && kvp.Value.Count > 0)
-            {
-                straightRoadPrefab = kvp.Value[0];
-                if (kvp.Value.Count > 1) intersectionPrefab = kvp.Value[1];
-            }
+            tiers.Add(new BuildingTier { name = "Buildings", prefabs = buildingPrefabs.ToArray(), approxRoofHeight = 12f });
+        }
+        if (environmentPrefabs.Count > 0)
+        {
+            tiers.Add(new BuildingTier { name = "Environment (niedrig)", prefabs = environmentPrefabs.ToArray(), approxRoofHeight = 4f });
         }
 
         buildingTiers = tiers.ToArray();
-        Debug.Log($"[FullMapGenerator] Gefunden: {buildingTiers.Length} Gebaeude-Tiers " +
-                  $"({string.Join(", ", buildingTiers.Select(t => $"{t.name}:{t.prefabs.Length}"))}), " +
-                  $"Straße: {(straightRoadPrefab != null ? straightRoadPrefab.name : "keine gefunden")}. " +
-                  "Falls hier nichts/falsches steht: Prefab Root pruefen oder Felder manuell im Inspector reinziehen.");
+
+        if (roadCandidates.Count > 0 && straightRoadPrefab == null)
+        {
+            straightRoadPrefab = roadCandidates[0];
+        }
+
+        Debug.Log($"[FullMapGenerator] {totalPrefabsScanned} Prefabs unter '{prefabRoot}' gescannt. " +
+                  $"Gefunden: {buildingPrefabs.Count} Gebaeude, {environmentPrefabs.Count} Environment-Objekte, " +
+                  $"{roadCandidates.Count} Straßen-Kandidaten (davon '{(straightRoadPrefab != null ? straightRoadPrefab.name : "keiner")}' automatisch als Straight Road Prefab gesetzt -- " +
+                  "im Inspector pruefen/austauschen, falls das nicht das richtige gerade Straßenstueck ist). " +
+                  (buildingPrefabs.Count == 0 ? "ACHTUNG: keine Gebaeude gefunden -- Prefab Root pruefen oder Ordnernamen im Project-Fenster checken." : ""));
     }
 #endif
 
@@ -260,6 +287,8 @@ public class FullMapGenerator : MonoBehaviour
 
         float cell = blockSize + roadWidth;
         var blockCenters = new List<Vector3>();
+        int placedCount = 0;
+        int skippedCount = 0;
 
         for (int r = 0; r < rows; r++)
         {
@@ -281,17 +310,32 @@ public class FullMapGenerator : MonoBehaviour
 
                         bool isEdgePlot = x == 0 || z == 0 || x == plotsPerBlockSide - 1 || z == plotsPerBlockSide - 1;
                         BuildingTier tier = PickTier(isEdgePlot);
-                        if (tier == null || tier.prefabs == null || tier.prefabs.Length == 0) continue;
+                        if (tier == null || tier.prefabs == null || tier.prefabs.Length == 0)
+                        {
+                            skippedCount++;
+                            continue;
+                        }
 
                         GameObject prefab = tier.prefabs[Random.Range(0, tier.prefabs.Length)];
                         float rotationY = Random.Range(0, 4) * 90f;
                         GameObject instance = Instantiate(prefab, plotCenter, Quaternion.Euler(0, rotationY, 0), blockRoot);
                         instance.name = $"{prefab.name}_{x}_{z}";
+                        placedCount++;
                     }
                 }
 
                 blockCenters.Add(blockOrigin + new Vector3(blockSize * 0.5f, 0, blockSize * 0.5f));
             }
+        }
+
+        if (skippedCount > 0)
+        {
+            Debug.LogWarning($"[FullMapGenerator] {skippedCount} Gebaeude-Plots uebersprungen, weil die zugeloste Tier keine Prefabs hatte -- " +
+                              $"{placedCount} Gebaeude wurden trotzdem platziert. Falls placedCount 0 ist: 'Building Tiers' im Inspector pruefen, sind da wirklich Prefabs drin?");
+        }
+        else
+        {
+            Debug.Log($"[FullMapGenerator] {placedCount} Gebaeude platziert.");
         }
 
         return blockCenters;
